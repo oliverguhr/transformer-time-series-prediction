@@ -1,0 +1,6 @@
+*.pdf
+traindata.pt
+.vscode
+.ipynb_checkpoints
+graph
+transformer-gif

@@ -116,7 +116,7 @@ def get_data():
 
     #test_data = torch.FloatTensor(test_data).view(-1) 
     test_data = create_inout_sequences(test_data,input_window)
-    test_data = train_sequence[:-output_window] #todo: fix hack?
+    test_data = test_data[:-output_window] #todo: fix hack?
 
     return train_sequence.to(device),test_data.to(device)
 

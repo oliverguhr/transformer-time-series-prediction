@@ -100,7 +100,7 @@ def get_data():
     
     # looks like normalizing input values curtial for the model
     scaler = MinMaxScaler(feature_range=(-1, 1)) 
-    #amplitude = series.to_numpy()
+    #amplitude = scaler.fit_transform(series.to_numpy().reshape(-1, 1)).reshape(-1)
     amplitude = scaler.fit_transform(amplitude.reshape(-1, 1)).reshape(-1)
     
     
@@ -112,7 +112,7 @@ def get_data():
     #train_tensor = torch.FloatTensor(train_data).view(-1)
     # todo: add comment.. 
     train_sequence = create_inout_sequences(train_data,input_window)
-    train_sequence = train_sequence[:-output_window] #todo: fix hack? -> din't think this trough, looks like the last n sequences are to short, so I just remove them. Hackety Hack.. 
+    train_sequence = train_sequence[:-output_window] #todo: fix hack? -> din't think this through, looks like the last n sequences are to short, so I just remove them. Hackety Hack.. 
 
     #test_data = torch.FloatTensor(test_data).view(-1) 
     test_data = create_inout_sequences(test_data,input_window)
@@ -215,7 +215,7 @@ def evaluate(eval_model, data_source):
             data, targets = get_batch(data_source, i,eval_batch_size)
             output = eval_model(data)            
             total_loss += len(data[0])* criterion(output, targets).cpu().item()
-    return total_loss / i
+    return total_loss / len(data_source)
 
 train_data, val_data = get_data()
 model = TransAm().to(device)
@@ -227,7 +227,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 
 best_val_loss = float("inf")
-epochs = 10 # The number of epochs
+epochs = 100 # The number of epochs
 best_model = None
 
 for epoch in range(1, epochs + 1):

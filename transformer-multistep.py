@@ -98,7 +98,7 @@ def get_data():
     
     from sklearn.preprocessing import MinMaxScaler
     scaler = MinMaxScaler(feature_range=(-1, 1)) 
-    #amplitude = series.to_numpy()
+    #amplitude = scaler.fit_transform(series.to_numpy().reshape(-1, 1)).reshape(-1)
     amplitude = scaler.fit_transform(amplitude.reshape(-1, 1)).reshape(-1)
     
     
@@ -114,7 +114,7 @@ def get_data():
 
     #test_data = torch.FloatTensor(test_data).view(-1) 
     test_data = create_inout_sequences(test_data,input_window)
-    test_data = train_sequence[:-output_window] #todo: fix hack?
+    test_data = test_data[:-output_window] #todo: fix hack?
 
     return train_sequence.to(device),test_data.to(device)
 
@@ -219,7 +219,7 @@ def evaluate(eval_model, data_source):
             output = eval_model(data)            
             #total_loss += len(data[0])* criterion(output[-output_window:], targets[-output_window:]).cpu().item()
             total_loss += len(data[0])* criterion(output, targets).cpu().item()
-    return total_loss / i
+    return total_loss / len(data_source)
 
 train_data, val_data = get_data()
 model = TransAm().to(device)

@@ -8,6 +8,11 @@ from matplotlib import pyplot
 torch.manual_seed(0)
 np.random.seed(0)
 
+# This concept is also called teacher forceing. 
+# The flag decides if the loss will be calculted over all 
+# or just the predicted values.
+calculate_loss_over_all_values = False
+
 # S is the source sequence length
 # T is the target sequence length
 # N is the batch size
@@ -135,8 +140,12 @@ def train(train_data):
         data, targets = get_batch(train_data, i,batch_size)
         optimizer.zero_grad()
         output = model(data)        
-        #loss = criterion(output[-output_window:], targets[-output_window:])
-        loss = criterion(output, targets)
+
+        if calculate_loss_over_all_values:
+            loss = criterion(output, targets)
+        else:
+            loss = criterion(output[-output_window:], targets[-output_window:])
+    
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
@@ -164,9 +173,12 @@ def plot_and_loss(eval_model, data_source,epoch):
         for i in range(0, len(data_source) - 1):
             data, target = get_batch(data_source, i,1)
             # look like the model returns static values for the output window
-            output = eval_model(data)                    
-            #total_loss += criterion(output[-output_window:], target[-output_window:]).item()
-            total_loss += criterion(output, target).item()
+            output = eval_model(data)    
+            if calculate_loss_over_all_values:                                
+                total_loss += criterion(output, target).item()
+            else:
+                total_loss += criterion(output[-output_window:], target[-output_window:]).item()
+            
             test_result = torch.cat((test_result, output[-1].view(-1).cpu()), 0) #todo: check this. -> looks good to me
             truth = torch.cat((truth, target[-1].view(-1).cpu()), 0)
             
@@ -217,8 +229,10 @@ def evaluate(eval_model, data_source):
         for i in range(0, len(data_source) - 1, eval_batch_size):
             data, targets = get_batch(data_source, i,eval_batch_size)
             output = eval_model(data)            
-            #total_loss += len(data[0])* criterion(output[-output_window:], targets[-output_window:]).cpu().item()
-            total_loss += len(data[0])* criterion(output, targets).cpu().item()
+            if calculate_loss_over_all_values:
+                total_loss += len(data[0])* criterion(output, targets).cpu().item()
+            else:                                
+                total_loss += len(data[0])* criterion(output[-output_window:], targets[-output_window:]).cpu().item()            
     return total_loss / len(data_source)
 
 train_data, val_data = get_data()

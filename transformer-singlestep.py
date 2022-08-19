@@ -19,7 +19,9 @@ np.random.seed(0)
 
 input_window = 100 # number of input steps
 output_window = 1 # number of prediction steps, in this model its fixed to one
-batch_size = 10 
+block_len = input_window + output_window # for one input-output pair
+batch_size = 10
+train_size = 0.8
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class PositionalEncoding(nn.Module):
@@ -28,26 +30,33 @@ class PositionalEncoding(nn.Module):
         super(PositionalEncoding, self).__init__()       
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        # div_term = torch.exp(
+        #     torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        # )
+        div_term = 1 / (10000 ** ((2 * np.arange(d_model)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term[0::2])
+        pe[:, 1::2] = torch.cos(position * div_term[1::2])
+
+        pe = pe.unsqueeze(0).transpose(0, 1) # [5000, 1, d_model],so need seq-len <= 5000
         #pe.requires_grad = False
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        return x + self.pe[:x.size(0), :]
+        # print(self.pe[:x.size(0), :].repeat(1,x.shape[1],1).shape ,'---',x.shape)
+        # dimension 1 maybe inequal batchsize
+        return x + self.pe[:x.size(0), :].repeat(1,x.shape[1],1)
           
 
 class TransAm(nn.Module):
     def __init__(self,feature_size=250,num_layers=1,dropout=0.1):
         super(TransAm, self).__init__()
         self.model_type = 'Transformer'
-        
+        self.input_embedding  = nn.Linear(1,feature_size)
         self.src_mask = None
+
         self.pos_encoder = PositionalEncoding(feature_size)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=feature_size, nhead=10, dropout=dropout)
-        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)        
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
         self.decoder = nn.Linear(feature_size,1)
         self.init_weights()
 
@@ -57,11 +66,13 @@ class TransAm(nn.Module):
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
     def forward(self,src):
+        # src with shape (input_window, batch_len, 1)
         if self.src_mask is None or self.src_mask.size(0) != len(src):
             device = src.device
             mask = self._generate_square_subsequent_mask(len(src)).to(device)
             self.src_mask = mask
 
+        src = self.input_embedding(src) # linear transformation before positional embedding
         src = self.pos_encoder(src)
         output = self.transformer_encoder(src,self.src_mask)#, self.src_mask)
         output = self.decoder(output)
@@ -72,26 +83,37 @@ class TransAm(nn.Module):
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
-
-
 # if window is 100 and prediction step is 1
 # in -> [0..99]
 # target -> [1..100]
-def create_inout_sequences(input_data, tw):
+'''
+In fact, assuming that the number of samples is N, 
+the length of the input sequence is m, and the backward prediction is k steps, 
+then length of a block [input : 1 , 2 ... m  -> output : k , k+1....m+k ] 
+should be (m+k) :  block_len, so to ensure that each block is complete, 
+the end element of the last block should be the end element of the entire sequence, 
+so the actual number of blocks is [N - block_len + 1] 
+'''
+def create_inout_sequences(input_data, input_window ,output_window):
     inout_seq = []
     L = len(input_data)
-    for i in range(L-tw):
-        train_seq = input_data[i:i+tw]
-        train_label = input_data[i+output_window:i+tw+output_window]
+    block_num =  L - block_len + 1
+    # total of [N - block_len + 1] blocks
+    # where block_len = input_window + output_window
+
+    for i in range( block_num ):
+        train_seq = input_data[i : i + input_window]
+        train_label = input_data[i + output_window : i + input_window + output_window]
         inout_seq.append((train_seq ,train_label))
-    return torch.FloatTensor(inout_seq)
+
+    return torch.FloatTensor(np.array(inout_seq))
 
 def get_data():
     # construct a littel toy dataset
     time        = np.arange(0, 400, 0.1)    
-    amplitude   = np.sin(time) + np.sin(time*0.05) +np.sin(time*0.12) *np.random.normal(-0.2, 0.2, len(time))
+    amplitude   = np.sin(time) + np.sin(time * 0.05) + \
+                  np.sin(time * 0.12) * np.random.normal(-0.2, 0.2, len(time))
 
-    
     from sklearn.preprocessing import MinMaxScaler
     
     #loading weather data from a file
@@ -102,39 +124,46 @@ def get_data():
     scaler = MinMaxScaler(feature_range=(-1, 1)) 
     #amplitude = scaler.fit_transform(series.to_numpy().reshape(-1, 1)).reshape(-1)
     amplitude = scaler.fit_transform(amplitude.reshape(-1, 1)).reshape(-1)
-    
-    
-    sampels = 2600
+
+    sampels = int(len(time) * train_size) # use a parameter to control training size
     train_data = amplitude[:sampels]
     test_data = amplitude[sampels:]
 
     # convert our train data into a pytorch train tensor
     #train_tensor = torch.FloatTensor(train_data).view(-1)
-    # todo: add comment.. 
-    train_sequence = create_inout_sequences(train_data,input_window)
-    train_sequence = train_sequence[:-output_window] #todo: fix hack? -> din't think this through, looks like the last n sequences are to short, so I just remove them. Hackety Hack.. 
 
+    train_sequence = create_inout_sequences( train_data,input_window ,output_window)
+    '''
+    train_sequence = train_sequence[:-output_window] # todo: fix hack? -> din't think this through, looks like the last n sequences are to short, so I just remove them. Hackety Hack..
+    # looks like maybe solved
+    '''
     #test_data = torch.FloatTensor(test_data).view(-1) 
-    test_data = create_inout_sequences(test_data,input_window)
-    test_data = test_data[:-output_window] #todo: fix hack?
-
+    test_data = create_inout_sequences(test_data,input_window,output_window)
+    '''
+    test_data = test_data[:-output_window] # todo: fix hack?
+    '''
+    # shape with (block , sql_len , 2 )
     return train_sequence.to(device),test_data.to(device)
 
-def get_batch(source, i,batch_size):
-    seq_len = min(batch_size, len(source) - 1 - i)
-    data = source[i:i+seq_len]    
-    input = torch.stack(torch.stack([item[0] for item in data]).chunk(input_window,1)) # 1 is feature size
-    target = torch.stack(torch.stack([item[1] for item in data]).chunk(input_window,1))
-    return input, target
 
+def get_batch(input_data, i , batch_size):
+
+    # batch_len = min(batch_size, len(input_data) - 1 - i) #  # Now len-1 is not necessary
+    batch_len = min(batch_size, len(input_data) - i)
+    data = input_data[ i:i + batch_len ]
+    input = torch.stack([item[0] for item in data]).view((input_window,batch_len,1))
+    # ( seq_len, batch, 1 ) , 1 is feature size
+    target = torch.stack([item[1] for item in data]).view((input_window,batch_len,1))
+    return input, target
 
 def train(train_data):
     model.train() # Turn on the train mode \o/
     total_loss = 0.
     start_time = time.time()
 
-    for batch, i in enumerate(range(0, len(train_data) - 1, batch_size)):
-        data, targets = get_batch(train_data, i,batch_size)
+    for batch, i in enumerate(range(0, len(train_data), batch_size)):  # Now len-1 is not necessary
+        # data and target are the same shape with (input_window,batch_len,1)
+        data, targets = get_batch(train_data, i , batch_size)
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, targets)
@@ -162,8 +191,9 @@ def plot_and_loss(eval_model, data_source,epoch):
     test_result = torch.Tensor(0)    
     truth = torch.Tensor(0)
     with torch.no_grad():
-        for i in range(0, len(data_source) - 1):
-            data, target = get_batch(data_source, i,1)
+        # for i in range(0, len(data_source) - 1):
+        for i in range(len(data_source)):  # Now len-1 is not necessary
+            data, target = get_batch(data_source, i , 1) # one-step forecast
             output = eval_model(data)            
             total_loss += criterion(output, target).item()
             test_result = torch.cat((test_result, output[-1].view(-1).cpu()), 0)
@@ -179,7 +209,6 @@ def plot_and_loss(eval_model, data_source,epoch):
     pyplot.axhline(y=0, color='k')
     pyplot.savefig('graph/transformer-epoch%d.png'%epoch)
     pyplot.close()
-    
     return total_loss / i
 
 
@@ -189,20 +218,23 @@ def predict_future(eval_model, data_source,steps):
     total_loss = 0.
     test_result = torch.Tensor(0)    
     truth = torch.Tensor(0)
-    data, _ = get_batch(data_source, 0,1)
+    data, _ = get_batch(data_source , 0 , 1)
     with torch.no_grad():
         for i in range(0, steps):            
-            output = eval_model(data[-input_window:])                        
-            data = torch.cat((data, output[-1:]))
-            
+            output = eval_model(data[-input_window:])
+            # (seq-len , batch-size , features-num)
+            # input : [ m,m+1,...,m+n ] -> [m+1,...,m+n+1]
+            data = torch.cat((data, output[-1:])) # [m,m+1,..., m+n+1]
+
     data = data.cpu().view(-1)
     
-    # I used this plot to visualize if the model pics up any long therm struccture within the data. 
+    # I used this plot to visualize if the model pics up any long therm structure within the data.
     pyplot.plot(data,color="red")       
     pyplot.plot(data[:input_window],color="blue")    
     pyplot.grid(True, which='both')
     pyplot.axhline(y=0, color='k')
     pyplot.savefig('graph/transformer-future%d.png'%steps)
+    pyplot.show()
     pyplot.close()
         
 
@@ -211,10 +243,11 @@ def evaluate(eval_model, data_source):
     total_loss = 0.
     eval_batch_size = 1000
     with torch.no_grad():
-        for i in range(0, len(data_source) - 1, eval_batch_size):
+        # for i in range(0, len(data_source) - 1, eval_batch_size): # Now len-1 is not necessary
+        for i in range(0, len(data_source), eval_batch_size):
             data, targets = get_batch(data_source, i,eval_batch_size)
             output = eval_model(data)            
-            total_loss += len(data[0])* criterion(output, targets).cpu().item()
+            total_loss += len(data[0]) * criterion(output, targets).cpu().item()
     return total_loss / len(data_source)
 
 train_data, val_data = get_data()
@@ -224,17 +257,16 @@ criterion = nn.MSELoss()
 lr = 0.005 
 #optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1, gamma=0.95)
 
 best_val_loss = float("inf")
-epochs = 100 # The number of epochs
+epochs = 10 # The number of epochs
 best_model = None
 
 for epoch in range(1, epochs + 1):
     epoch_start_time = time.time()
     train(train_data)
-    
-    if(epoch % 10 is 0):
+    if ( epoch % 5 == 0 ):
         val_loss = plot_and_loss(model, val_data,epoch)
         predict_future(model, val_data,200)
     else:
